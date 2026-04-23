@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 import json
+import traceback
 import uuid
 
 import duckdb
@@ -277,6 +278,44 @@ def _is_due_now(timeframe: str, now: Optional[datetime] = None) -> bool:
     return False
 
 
+def _log_detect_error(
+    run_id: str,
+    strategy_id: str,
+    exc: BaseException,
+) -> str:
+    """Persist a per-strategy detect failure to live-signals.detect_errors.
+
+    Returns the error_id. Safe to call outside a DB transaction — opens its
+    own write connection; if that connection fails (rare lock), we log to
+    stderr and continue so the main detect loop never dies.
+    """
+    error_id = f"err-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    try:
+        LIVE_DB.parent.mkdir(parents=True, exist_ok=True)
+        con = duckdb.connect(str(LIVE_DB))
+        try:
+            con.execute(
+                """
+                INSERT INTO detect_errors (
+                    error_id, run_id, strategy_id, error_at,
+                    error_type, error_message, traceback_text, engine_version
+                ) VALUES (?, ?, ?, ?::TIMESTAMP, ?, ?, ?, ?)
+                """,
+                [
+                    error_id, run_id, strategy_id,
+                    datetime.now(timezone.utc).replace(tzinfo=None),
+                    type(exc).__name__, str(exc)[:500], tb[:10_000],
+                    ENGINE_VERSION,
+                ],
+            )
+        finally:
+            con.close()
+    except Exception as log_err:  # last-resort: don't let error-logging crash detect
+        print(f"  WARN: could not persist detect_error ({log_err})", flush=True)
+    return error_id
+
+
 def detect_all_promoted(
     *,
     persist: bool = True,
@@ -286,8 +325,10 @@ def detect_all_promoted(
     Iterate all strategies with status='promoted' and check each.
     When respect_schedule=True, skip strategies whose timeframe isn't due now.
 
-    Returns a list of fired signals.
+    Per-strategy failures are logged to `detect_errors` with full traceback
+    and do NOT stop the batch. Returns a list of fired signals.
     """
+    run_id = f"run-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
     strategies, _errors = validate_all()
     promoted = [s for s in strategies if s.status == "promoted"]
     fired: list[SignalFired] = []
@@ -298,11 +339,36 @@ def detect_all_promoted(
         try:
             sig = detect_signals_for_strategy(strat.id)
         except Exception as e:
-            print(f"  ERROR {strat.id}: {e}", flush=True)
+            err_id = _log_detect_error(run_id, strat.id, e)
+            print(f"  ERROR {strat.id}: {type(e).__name__}: {e}  (err_id={err_id})", flush=True)
             continue
         if sig is None:
             continue
         fired.append(sig)
         if persist:
-            persist_signal(sig)
+            try:
+                persist_signal(sig)
+            except Exception as e:
+                err_id = _log_detect_error(run_id, strat.id, e)
+                print(f"  PERSIST-ERROR {strat.id}: {type(e).__name__}: {e}  (err_id={err_id})", flush=True)
     return fired
+
+
+def recent_detect_errors(hours: int = 24) -> list[dict]:
+    """Return recent detect errors for health-check / debugging."""
+    con = duckdb.connect(str(LIVE_DB), read_only=True)
+    try:
+        cur = con.execute(
+            """
+            SELECT error_id, run_id, strategy_id, error_at, error_type,
+                   error_message, engine_version
+            FROM detect_errors
+            WHERE error_at >= CURRENT_TIMESTAMP - INTERVAL (? ) HOUR
+            ORDER BY error_at DESC
+            """,
+            [hours],
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    finally:
+        con.close()
