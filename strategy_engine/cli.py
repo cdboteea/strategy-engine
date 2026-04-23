@@ -592,6 +592,48 @@ def intraday_status_cmd(as_json: bool) -> None:
         click.echo(f"  {sym:<8} {tf:<8} latest={latest}  n_bars={n}")
 
 
+# ── health ──────────────────────────────────────────────────────────────────
+
+
+@cli.command("health")
+@click.option("--json", "as_json", is_flag=True)
+@click.option("--verbose", "-v", is_flag=True, help="Show all checks, including 'ok'")
+def health_cmd(as_json: bool, verbose: bool) -> None:
+    """Run system health check: DBs, launchd agents, errors, paper book, registry.
+
+    Exit codes: 0=ok, 1=warnings, 2=errors.
+    """
+    from .live.health import run_health_check
+    report = run_health_check()
+
+    if as_json:
+        click.echo(json.dumps({
+            "checked_at": report.checked_at,
+            "status": report.status,
+            "summary": report.summary_line(),
+            "checks": [
+                {"name": c.name, "severity": c.severity, "detail": c.detail, "extras": c.extras}
+                for c in report.checks
+            ],
+        }, indent=2, default=str))
+    else:
+        click.echo(f"Health check @ {report.checked_at}")
+        click.echo(f"  {report.summary_line()}")
+        for c in report.checks:
+            if not verbose and c.severity == "ok":
+                continue
+            icon = {"ok": "✓", "warn": "⚠", "error": "✗"}[c.severity]
+            click.echo(f"  {icon} [{c.severity}] {c.name}: {c.detail}")
+            if c.extras:
+                for k, v in c.extras.items():
+                    click.echo(f"       {k}: {v}")
+        if not verbose and report.status == "ok":
+            click.echo("  (all checks passed — pass -v to show details)")
+
+    exit_code = {"ok": 0, "warn": 1, "error": 2}[report.status]
+    sys.exit(exit_code)
+
+
 # ── paper trading ────────────────────────────────────────────────────────────
 
 
@@ -643,10 +685,26 @@ def paper_positions_cmd(status: str, as_json: bool) -> None:
 def paper_report_cmd(as_json: bool) -> None:
     """High-level book report."""
     from .paper import overall_summary, realized_pnl_by_strategy
+    from .paper.reporting import nav_risk_metrics
     overall = overall_summary()
     per = realized_pnl_by_strategy()
+    risk = nav_risk_metrics()
     if as_json:
-        click.echo(json.dumps({"overall": overall, "per_strategy": per}, default=str, indent=2))
+        click.echo(json.dumps({
+            "overall": overall,
+            "per_strategy": per,
+            "risk_metrics": {
+                "n_snapshots": risk.n_snapshots,
+                "total_return_pct": risk.total_return_pct,
+                "annualized_return_pct": risk.annualized_return_pct,
+                "max_drawdown_pct": risk.max_drawdown_pct,
+                "sortino_ratio": risk.sortino_ratio,
+                "calmar_ratio": risk.calmar_ratio,
+                "best_day_pct": risk.best_day_pct,
+                "worst_day_pct": risk.worst_day_pct,
+                "days_tracked": risk.days_tracked,
+            },
+        }, default=str, indent=2))
         return
     click.echo("Paper-trading book:")
     click.echo(f"  Latest NAV:           ${overall.get('latest_nav', 100000):,.2f}  (as of {overall.get('latest_nav_date', '—')})")
@@ -655,6 +713,18 @@ def paper_report_cmd(as_json: bool) -> None:
     click.echo(f"    closed:             {overall.get('n_closed', 0)}")
     click.echo(f"  Realized P&L:         ${overall.get('realized_usd', 0):+,.2f}")
     click.echo(f"  Unrealized P&L (open): ${overall.get('unrealized_usd', 0):+,.2f}")
+    click.echo()
+    click.echo("Risk-adjusted metrics (from NAV snapshots):")
+    if risk.n_snapshots < 2:
+        click.echo(f"  (need ≥2 snapshots; have {risk.n_snapshots}. Run paper mtm on 2+ days.)")
+    else:
+        click.echo(f"  Days tracked:         {risk.days_tracked}")
+        click.echo(f"  Total return:         {risk.total_return_pct:+.2%}")
+        click.echo(f"  Annualized return:    {risk.annualized_return_pct:+.2%}")
+        click.echo(f"  Max drawdown:         {risk.max_drawdown_pct:.2%}")
+        click.echo(f"  Sortino:              {risk.sortino_ratio:.3f}")
+        click.echo(f"  Calmar:               {risk.calmar_ratio:.3f}")
+        click.echo(f"  Best / worst day:     {risk.best_day_pct:+.2%} / {risk.worst_day_pct:+.2%}")
     click.echo()
     if per:
         click.echo("Per strategy:")
@@ -667,6 +737,22 @@ def paper_report_cmd(as_json: bool) -> None:
                 f"win={wr:.1%}  "
                 f"${row['realized_usd']:+,.2f}"
             )
+
+
+@paper.command("equity-curves")
+@click.option("--output-dir", default=None, help="Override output dir (default ~/clawd/reports/paper)")
+def paper_equity_curves_cmd(output_dir: str | None) -> None:
+    """Render per-strategy cumulative-P&L PNGs."""
+    from .paper.reporting import export_all_equity_pngs
+    from pathlib import Path
+    out = Path(output_dir) if output_dir else None
+    paths = export_all_equity_pngs(output_dir=out)
+    if not paths:
+        click.echo("  (no strategies with closed positions — nothing to render)")
+        return
+    click.echo(f"✓ wrote {len(paths)} equity-curve PNG(s):")
+    for p in paths:
+        click.echo(f"  {p}")
 
 
 @paper.command("close")
