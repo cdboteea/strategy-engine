@@ -127,6 +127,9 @@ def registry_count() -> None:
 @click.option("--end", default=None, help="End date YYYY-MM-DD (overrides YAML backtest_window)")
 @click.option("--no-persist", is_flag=True, help="Do not write to backtest-results.duckdb")
 @click.option("--no-yaml-update", is_flag=True, help="Do not append run_id to strategy YAML")
+@click.option("--cost-profile", default=None,
+              type=click.Choice(["zero", "retail-equity", "institutional-equity"]),
+              help="Override YAML cost_model with a named profile")
 @click.option("--json", "as_json", is_flag=True)
 def backtest_cmd(
     strategy_id: str,
@@ -134,17 +137,22 @@ def backtest_cmd(
     end: str | None,
     no_persist: bool,
     no_yaml_update: bool,
+    cost_profile: str | None,
     as_json: bool,
 ) -> None:
     """Run a backtest for a single strategy and persist the result.
 
     Precedence for date window: --start/--end flags > YAML backtest_window > full history.
+    Precedence for costs:       --cost-profile flag > YAML cost_model > retail-equity default.
     """
     from .backtest.runner import run_strategy, append_run_to_yaml, BacktestError
+    from .backtest.costs import CostModel
     from .providers.duckdb_provider import DataNotAvailable
 
+    cost_override = CostModel.by_name(cost_profile) if cost_profile else None
     try:
-        run = run_strategy(strategy_id, persist=not no_persist, start=start, end=end)
+        run = run_strategy(strategy_id, persist=not no_persist, start=start, end=end,
+                            cost_model=cost_override)
     except (BacktestError, DataNotAvailable) as e:
         click.echo(f"backtest failed: {e}", err=True)
         sys.exit(1)

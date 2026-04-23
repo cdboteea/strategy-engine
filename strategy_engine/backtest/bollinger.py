@@ -318,6 +318,7 @@ def summarize(
     bars: Optional[pd.DataFrame] = None,
     capital_allocation: float = 0.10,
     timeframe: str = "1w",
+    cost_model=None,
 ) -> BollingerResult:
     """
     Compute per-trade + equity-curve summary metrics.
@@ -328,6 +329,12 @@ def summarize(
     """
     if not trades:
         return BollingerResult()
+    # Apply transaction cost model to each trade's pct_return BEFORE summary.
+    # `trades` objects are mutated in place so the per-trade serialization
+    # downstream (runner payload) reflects net returns.
+    if cost_model is not None and cost_model.round_trip_pct > 0:
+        for t in trades:
+            t.pct_return = cost_model.apply_to_return(t.pct_return)
     returns = np.array([t.pct_return for t in trades])
     wins = returns[returns > 0]
     losses = returns[returns <= 0]
@@ -371,6 +378,7 @@ def run_bollinger(
     *,
     capital_allocation: float = 0.10,
     timeframe: str = "1w",
+    cost_model=None,
 ) -> BollingerResult:
     """
     End-to-end: compute bands → detect signals → simulate trades → summarize.
@@ -379,11 +387,15 @@ def run_bollinger(
     For weekly-bar strategy, resample daily → weekly BEFORE calling this.
 
     `capital_allocation` and `timeframe` are used for the equity-curve Sharpe
-    computation (the proper risk-adjusted metric). Defaults target SPY weekly.
+    computation. `cost_model` (optional) nets transaction costs from each
+    trade's pct_return — see strategy_engine.backtest.costs.CostModel.
     """
     if not {"open", "high", "low", "close"}.issubset(bars.columns):
         raise ValueError("bars must have open/high/low/close columns")
     df = compute_bollinger(bars, params.lookback, params.std_dev)
     df = detect_signals(df)
     trades = simulate_trades(df, params)
-    return summarize(trades, bars=bars, capital_allocation=capital_allocation, timeframe=timeframe)
+    return summarize(
+        trades, bars=bars, capital_allocation=capital_allocation,
+        timeframe=timeframe, cost_model=cost_model,
+    )

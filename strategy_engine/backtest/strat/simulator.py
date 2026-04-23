@@ -413,12 +413,18 @@ def summarize(
     bars: pd.DataFrame,
     capital_allocation: float,
     timeframe: str,
+    cost_model=None,
 ) -> StratResult:
     if not trades:
         return StratResult(
             n_signals_raw=n_signals_raw,
             n_signals_ftfc=n_signals_ftfc,
         )
+
+    # Apply transaction cost to each trade's pct_return in place
+    if cost_model is not None and cost_model.round_trip_pct > 0:
+        for t in trades:
+            t.pct_return = cost_model.apply_to_return(t.pct_return)
 
     returns = np.array([t.pct_return for t in trades])
     wins = returns[returns > 0]

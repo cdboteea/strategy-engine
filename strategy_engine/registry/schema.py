@@ -72,6 +72,23 @@ class SignalLogic(BaseModel):
         return v
 
 
+class CostModelBlock(BaseModel):
+    """Per-strategy transaction cost model override.
+
+    Uses `profile` (named preset) OR explicit bps fields. When both
+    are set, explicit fields override the profile's defaults per field.
+
+    Defaults when this block is absent: `profile: retail-equity`
+    (2 bp spread + 1 bp slippage + 1 bp commission per leg).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    profile: Optional[Literal["zero", "retail-equity", "institutional-equity"]] = None
+    spread_bps: Optional[float] = Field(default=None, ge=0)
+    slippage_bps: Optional[float] = Field(default=None, ge=0)
+    commission_bps: Optional[float] = Field(default=None, ge=0)
+
+
 class CompositeMeta(BaseModel):
     """
     Composite-strategy wiring. Only used when `signal_logic.type == 'composite'`.
@@ -132,6 +149,7 @@ class Strategy(BaseModel):
     notes_doc: Optional[str] = None
     promotion: Optional[PromotionMeta] = None
     composite: Optional[CompositeMeta] = None
+    cost_model: Optional[CostModelBlock] = None
 
     @model_validator(mode="after")
     def _check_composite(self) -> "Strategy":

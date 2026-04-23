@@ -79,6 +79,8 @@ def _run_primary_bollinger(
     strategy: Strategy,
     start: Optional[str],
     end: Optional[str],
+    *,
+    cost_model=None,
 ) -> tuple[bol.BollingerResult, pd.DataFrame]:
     """Run a Bollinger primary end-to-end. Returns the full result + bars."""
     if strategy.signal_logic.type != "bollinger-mean-reversion":
@@ -96,6 +98,7 @@ def _run_primary_bollinger(
         bars, params,
         capital_allocation=strategy.capital_allocation,
         timeframe=tf,
+        cost_model=cost_model,
     )
     return result, bars
 
@@ -276,19 +279,22 @@ def run_composite(
     *,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    cost_model=None,
 ) -> CompositeRunResult:
     """
     Run a composite strategy end-to-end and return summary metrics +
-    filter-stage diagnostics.
+    filter-stage diagnostics. Cost model applies to the final filtered
+    trade list (not to the discarded raw-primary trades).
     """
     if strategy.composite is None or strategy.signal_logic.type != "composite":
         raise CompositeError(f"{strategy.id}: not a composite strategy")
 
     cm = strategy.composite
 
-    # 1. Run primary end-to-end
+    # 1. Run primary end-to-end WITHOUT costs — we'll apply costs at the
+    #    re-summarize step on the filtered trade list only.
     primary = _load_strategy_by_id(cm.primary)
-    primary_result, primary_bars = _run_primary_bollinger(primary, start, end)
+    primary_result, primary_bars = _run_primary_bollinger(primary, start, end, cost_model=None)
 
     # 2. Collect confirmation events
     confirmations: dict[str, list[SignalEvent]] = {}
@@ -305,14 +311,13 @@ def run_composite(
         require_direction_match=cm.require_direction_match,
     )
 
-    # 4. Re-summarize filtered trades using primary's equity logic
-    #    Size according to the composite's own capital_allocation (may differ
-    #    from primary — e.g. higher-conviction composites may get more capital)
+    # 4. Re-summarize filtered trades with the composite's own cost model
     final = bol.summarize(
         filtered_trades,
         bars=primary_bars,
         capital_allocation=strategy.capital_allocation,
         timeframe=primary.timeframe,
+        cost_model=cost_model,
     )
 
     return CompositeRunResult(

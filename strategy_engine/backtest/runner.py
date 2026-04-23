@@ -23,6 +23,7 @@ from ..registry.loader import load_one
 from ..registry.schema import Strategy
 from . import bollinger as bol
 from . import composite as comp
+from .costs import CostModel
 from .strat import (
     classify_bars,
     detect_patterns,
@@ -103,6 +104,8 @@ def _run_strat(
     strategy: Strategy,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    *,
+    cost_model: Optional[CostModel] = None,
 ):
     """Run a STRAT-pattern strategy. Returns (StratResult, bars)."""
     symbol = strategy.instruments[0]
@@ -147,6 +150,7 @@ def _run_strat(
     trades, n_raw, n_ftfc = strat_simulate(classified, ftfc_df, params)
     result = strat_summarize(
         trades, n_raw, n_ftfc, trade_bars, strategy.capital_allocation, tf,
+        cost_model=cost_model,
     )
     return result, trade_bars
 
@@ -155,6 +159,8 @@ def _run_bollinger(
     strategy: Strategy,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    *,
+    cost_model: Optional[CostModel] = None,
 ) -> tuple[bol.BollingerResult, pd.DataFrame]:
     symbol = strategy.instruments[0]  # v1 — single instrument strategies only
     tf = strategy.timeframe
@@ -167,6 +173,7 @@ def _run_bollinger(
         params,
         capital_allocation=strategy.capital_allocation,
         timeframe=tf,
+        cost_model=cost_model,
     )
     return result, bars
 
@@ -177,6 +184,7 @@ def run_strategy(
     persist: bool = True,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    cost_model: Optional[CostModel] = None,
 ) -> BacktestRun:
     """
     Top-level entry point. Loads strategy YAML, dispatches by signal type,
@@ -196,13 +204,19 @@ def run_strategy(
     # Resolve effective window: CLI override > YAML > full history
     eff_start, eff_end = _resolve_window(strategy, start, end)
 
+    # Resolve cost model: explicit arg > YAML block > retail-equity default
+    effective_cost = cost_model if cost_model is not None else CostModel.from_strategy(strategy)
+
     composite_meta_payload: Optional[dict] = None
     if signal_type == "bollinger-mean-reversion":
-        result, bars = _run_bollinger(strategy, start=eff_start, end=eff_end)
+        result, bars = _run_bollinger(strategy, start=eff_start, end=eff_end,
+                                       cost_model=effective_cost)
     elif signal_type == "strat-pattern":
-        result, bars = _run_strat(strategy, start=eff_start, end=eff_end)
+        result, bars = _run_strat(strategy, start=eff_start, end=eff_end,
+                                   cost_model=effective_cost)
     elif signal_type == "composite":
-        comp_run = comp.run_composite(strategy, start=eff_start, end=eff_end)
+        comp_run = comp.run_composite(strategy, start=eff_start, end=eff_end,
+                                        cost_model=effective_cost)
         result = comp_run.result
         bars = comp_run.primary_bars
         composite_meta_payload = {

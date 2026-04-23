@@ -45,6 +45,8 @@ EXPECTED_AGENTS = [
     "com.matias.ideas-gmail-tostage",
     "com.matias.ideas-x-bookmarks",
     "com.matias.ideas-pdf-dropfolder",
+    "com.matias.ideas-telegram-queue",
+    "com.matias.ideas-graphiti-ingest",
     "com.matias.rotate-logs",
 ]
 
