@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.matias.strategy-engine.daily-detect</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mmirvois/clawd/venv/bin/strategy-engine</string>
+        <string>detect</string>
+        <string>--all-promoted</string>
+        <string>--force</string>
+        <string>--channel</string>
+        <string>auto</string>
+    </array>
+
+    <!-- Daily check: weekdays 16:30 ET (after market close). Matias's tz handling:
+         macOS cron runs in local tz. If local=ET, 16:30 works directly. If local=PT,
+         change to 13:30. launchd will use whatever local tz the machine is in. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key>
+            <integer>1</integer>
+            <key>Hour</key>
+            <integer>16</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>2</integer>
+            <key>Hour</key>
+            <integer>16</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>3</integer>
+            <key>Hour</key>
+            <integer>16</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>4</integer>
+            <key>Hour</key>
+            <integer>16</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>5</integer>
+            <key>Hour</key>
+            <integer>16</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mmirvois/clawd/logs/strategy-detect-daily.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/mmirvois/clawd/logs/strategy-detect-daily.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

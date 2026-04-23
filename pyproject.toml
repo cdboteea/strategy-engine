@@ -1,0 +1,17 @@
+[project]
+name = "strategy-engine"
+version = "0.1.0"
+description = "Registry + backtest + promotion + live-signal engine for Matias's trading strategies"
+requires-python = ">=3.12"
+dependencies = [
+  "click>=8.1",
+  "pyyaml>=6.0",
+  "pydantic>=2.5",
+]
+
+[project.scripts]
+strategy-engine = "strategy_engine.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["strategy_engine*"]

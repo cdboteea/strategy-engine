@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.matias.strategy-engine.weekly-detect</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mmirvois/clawd/venv/bin/strategy-engine</string>
+        <string>detect</string>
+        <string>--all-promoted</string>
+        <string>--force</string>
+        <string>--channel</string>
+        <string>auto</string>
+    </array>
+
+    <!-- Weekly check: Saturday 09:00 local time (weekly Bollinger bars are
+         complete by then; fmp daily_update runs Friday 7 PM so SPY/QQQ/GOOG/AAPL
+         fresh data is available). -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key>
+            <integer>6</integer>   <!-- Saturday -->
+            <key>Hour</key>
+            <integer>9</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mmirvois/clawd/logs/strategy-detect-weekly.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/mmirvois/clawd/logs/strategy-detect-weekly.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
