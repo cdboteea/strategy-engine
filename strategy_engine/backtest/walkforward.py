@@ -131,6 +131,34 @@ def _run_fold_strat(
     return strat_summarize(trades, n_raw, n_ftfc, slc_bars, capital_allocation, timeframe)
 
 
+def _run_fold_composite(
+    strategy: Strategy,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> BollingerResult:
+    """
+    Run a composite (primary + confirmations) on a single fold.
+
+    Unlike the bollinger / strat fold runners, this one goes through the
+    full composite pipeline because confirmation signals depend on their
+    own strategy's logic (which may include FTFC, pattern matching, etc.).
+    The extra cost is acceptable — composites typically have 2-3 confirmations
+    and the per-call overhead is modest.
+    """
+    # Local import to avoid circular dep at module load time
+    from .composite import run_composite
+    try:
+        comp_run = run_composite(
+            strategy,
+            start=start.date().isoformat(),
+            end=end.date().isoformat(),
+        )
+        return comp_run.result
+    except Exception:
+        # Fold is too short or missing data — treat as empty
+        return BollingerResult()
+
+
 def _result_metrics(res) -> dict:
     """Pull common fields from either Bollinger or STRAT result."""
     pf = getattr(res, "profit_factor", 0.0)
@@ -168,7 +196,7 @@ def run_walkforward(
       Fold N: train 2022-2024, test 2025
     """
     signal_type = strategy.signal_logic.type
-    if signal_type not in ("bollinger-mean-reversion", "strat-pattern"):
+    if signal_type not in ("bollinger-mean-reversion", "strat-pattern", "composite"):
         raise NotImplementedError(
             f"Walk-forward doesn't support signal type {signal_type!r}"
         )
@@ -200,8 +228,9 @@ def run_walkforward(
             min_risk_reward=float(getattr(strategy.exit, "min_risk_reward", 1.5)),
             max_holding_bars=int(getattr(sl, "max_holding_bars", 20)),
         )
-    else:
+    elif signal_type == "bollinger-mean-reversion":
         bol_params = BollingerParams.from_strategy(strategy)
+    # composite: no pre-compute — delegates to run_composite per fold
 
     # Generate fold date boundaries
     history_start = bars.index.min()
@@ -222,7 +251,7 @@ def run_walkforward(
         if signal_type == "bollinger-mean-reversion":
             train_res = _run_fold_bollinger(bars, train_start, train_end, bol_params, cap, tf)
             test_res = _run_fold_bollinger(bars, test_start, test_end, bol_params, cap, tf)
-        else:
+        elif signal_type == "strat-pattern":
             train_res = _run_fold_strat(
                 bars, classified_full, ftfc_full, train_start, train_end,
                 wanted_pattern, strat_params, cap, tf,
@@ -231,6 +260,9 @@ def run_walkforward(
                 bars, classified_full, ftfc_full, test_start, test_end,
                 wanted_pattern, strat_params, cap, tf,
             )
+        else:  # composite
+            train_res = _run_fold_composite(strategy, train_start, train_end)
+            test_res = _run_fold_composite(strategy, test_start, test_end)
 
         tr = _result_metrics(train_res)
         te = _result_metrics(test_res)

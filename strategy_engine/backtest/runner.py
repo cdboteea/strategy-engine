@@ -22,6 +22,7 @@ from ..providers.duckdb_provider import load_ohlcv, load_multi_timeframe, DataNo
 from ..registry.loader import load_one
 from ..registry.schema import Strategy
 from . import bollinger as bol
+from . import composite as comp
 from .strat import (
     classify_bars,
     detect_patterns,
@@ -195,14 +196,32 @@ def run_strategy(
     # Resolve effective window: CLI override > YAML > full history
     eff_start, eff_end = _resolve_window(strategy, start, end)
 
+    composite_meta_payload: Optional[dict] = None
     if signal_type == "bollinger-mean-reversion":
         result, bars = _run_bollinger(strategy, start=eff_start, end=eff_end)
     elif signal_type == "strat-pattern":
         result, bars = _run_strat(strategy, start=eff_start, end=eff_end)
+    elif signal_type == "composite":
+        comp_run = comp.run_composite(strategy, start=eff_start, end=eff_end)
+        result = comp_run.result
+        bars = comp_run.primary_bars
+        composite_meta_payload = {
+            "primary": strategy.composite.primary,
+            "confirmations": list(strategy.composite.confirmations),
+            "mode": strategy.composite.mode,
+            "window_days": strategy.composite.window_days,
+            "require_direction_match": strategy.composite.require_direction_match,
+            "filter_stats": {
+                "primary_trades_raw": comp_run.filter_stats.primary_trades_raw,
+                "primary_trades_after_confirmation": comp_run.filter_stats.primary_trades_after_confirmation,
+                "confirmations_per_source": comp_run.filter_stats.confirmations_per_source,
+                "drop_reason_counts": comp_run.filter_stats.drop_reason_counts,
+            },
+        }
     else:
         raise BacktestError(
             f"Unsupported signal_type {signal_type!r} for {strategy_id}. "
-            f"Supported: bollinger-mean-reversion, strat-pattern."
+            f"Supported: bollinger-mean-reversion, strat-pattern, composite."
         )
 
     # Build BacktestRun record
@@ -210,8 +229,9 @@ def run_strategy(
     start_date = bars.index.min().date().isoformat() if not bars.empty else ""
     end_date = bars.index.max().date().isoformat() if not bars.empty else ""
 
-    # Per-trade detail + summary serialization — shape differs per signal_type
-    if signal_type == "bollinger-mean-reversion":
+    # Per-trade detail + summary serialization — shape differs per signal_type.
+    # Composites re-use the Bollinger payload shape (their result IS BollingerResult).
+    if signal_type in ("bollinger-mean-reversion", "composite"):
         trades_payload = [
             {
                 "signal_date": t.signal_date.isoformat(),
@@ -290,10 +310,10 @@ def run_strategy(
             "target_hit_rate": result.target_hit_rate,
             "stop_hit_rate": result.stop_hit_rate,
         }
-    result_json = json.dumps(
-        {"summary": summary_payload, "trades": trades_payload},
-        default=str,
-    )
+    result_bundle = {"summary": summary_payload, "trades": trades_payload}
+    if composite_meta_payload is not None:
+        result_bundle["composite"] = composite_meta_payload
+    result_json = json.dumps(result_bundle, default=str)
 
     # For the top-level `oos_num_trades`, use n_trades (both strategy types expose this)
     n_trades = getattr(result, "n_trades", 0)

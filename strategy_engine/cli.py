@@ -505,6 +505,93 @@ def detect_cmd(
     sys.exit(2)
 
 
+# ── intraday poller ──────────────────────────────────────────────────────────
+
+
+@cli.group()
+def intraday() -> None:
+    """EODHD intraday polling — keeps live-ticks.duckdb fresh for hour-level detection."""
+
+
+@intraday.command("poll")
+@click.option("--lookback-days", type=int, default=5, help="How many days of history to always pull")
+@click.option("--json", "as_json", is_flag=True)
+def intraday_poll_cmd(lookback_days: int, as_json: bool) -> None:
+    """Fetch fresh intraday bars for every promoted intraday strategy."""
+    from .live.intraday_poller import poll_promoted
+
+    result = poll_promoted(lookback_days=lookback_days)
+    if as_json:
+        click.echo(json.dumps({
+            "poll_id": result.poll_id,
+            "status": result.status,
+            "targets": [{"symbol": t.symbol, "timeframe": t.timeframe} for t in result.targets],
+            "bars_inserted": result.bars_inserted,
+            "bars_updated": result.bars_updated,
+            "n_ok": result.n_ok,
+            "n_err": result.n_err,
+            "errors": result.errors,
+        }, indent=2, default=str))
+        return
+    click.echo(f"Poll {result.poll_id}  [{result.status}]")
+    click.echo(f"  targets:     {len(result.targets)}  ({result.n_ok} ok, {result.n_err} err)")
+    click.echo(f"  inserted:    {result.bars_inserted} bars")
+    click.echo(f"  updated:     {result.bars_updated} bars")
+    if result.errors:
+        click.echo("  errors:")
+        for e in result.errors:
+            click.echo(f"    - {e}")
+
+
+@intraday.command("status")
+@click.option("--json", "as_json", is_flag=True)
+def intraday_status_cmd(as_json: bool) -> None:
+    """Show the most recent poll and per-symbol freshness."""
+    import duckdb
+    from .config import LIVE_TICKS_DB
+
+    con = duckdb.connect(str(LIVE_TICKS_DB), read_only=True)
+    try:
+        last = con.execute(
+            "SELECT poll_id, status, started_at, finished_at, bars_inserted, bars_updated, "
+            "n_symbols_ok, n_symbols_err, error_summary "
+            "FROM poll_log ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        fresh = con.execute(
+            "SELECT symbol, timeframe, MAX(datetime) AS latest_bar, COUNT(*) AS n_bars "
+            "FROM ohlcv GROUP BY symbol, timeframe ORDER BY symbol, timeframe"
+        ).fetchall()
+    finally:
+        con.close()
+
+    if as_json:
+        click.echo(json.dumps({
+            "last_poll": dict(zip(
+                ["poll_id", "status", "started_at", "finished_at",
+                 "bars_inserted", "bars_updated", "n_symbols_ok", "n_symbols_err",
+                 "error_summary"],
+                last,
+            )) if last else None,
+            "freshness": [{"symbol": s, "timeframe": t, "latest_bar": str(d), "n_bars": n}
+                          for s, t, d, n in fresh],
+        }, indent=2, default=str))
+        return
+
+    if last:
+        click.echo(f"Last poll:   {last[0]}  [{last[1]}]")
+        click.echo(f"  started:   {last[2]}")
+        click.echo(f"  finished:  {last[3]}")
+        click.echo(f"  inserted:  {last[4]}   updated: {last[5]}")
+        click.echo(f"  ok/err:    {last[6]}/{last[7]}")
+        if last[8]:
+            click.echo(f"  errors:    {last[8][:200]}")
+    else:
+        click.echo("No polls logged yet.")
+    click.echo("\nFreshness per (symbol, timeframe):")
+    for sym, tf, latest, n in fresh:
+        click.echo(f"  {sym:<8} {tf:<8} latest={latest}  n_bars={n}")
+
+
 # ── paper trading ────────────────────────────────────────────────────────────
 
 

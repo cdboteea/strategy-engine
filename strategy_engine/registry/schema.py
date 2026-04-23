@@ -72,6 +72,28 @@ class SignalLogic(BaseModel):
         return v
 
 
+class CompositeMeta(BaseModel):
+    """
+    Composite-strategy wiring. Only used when `signal_logic.type == 'composite'`.
+
+    A composite runs its `primary` strategy end-to-end, then keeps only those
+    primary signals whose date has a matching `confirmations` signal within
+    ±window_days. This lets Bollinger signals be filtered by STRAT pattern
+    confirmation (or any combination of registered strategies).
+
+    v1 constraint: `primary` must reference a `bollinger-mean-reversion`
+    strategy. Confirmations may be any signal type. Entry/exit logic is
+    inherited from the primary.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    primary: str = Field(..., min_length=3)
+    confirmations: list[str] = Field(..., min_length=1)
+    mode: Literal["any", "all"] = "any"
+    window_days: int = Field(default=3, ge=0, le=365)
+    require_direction_match: bool = True
+
+
 class Entry(BaseModel):
     """Entry rules. Mode-specific fields held loosely."""
     model_config = ConfigDict(extra="allow")
@@ -109,6 +131,21 @@ class Strategy(BaseModel):
     tags: list[str] = Field(default_factory=list)
     notes_doc: Optional[str] = None
     promotion: Optional[PromotionMeta] = None
+    composite: Optional[CompositeMeta] = None
+
+    @model_validator(mode="after")
+    def _check_composite(self) -> "Strategy":
+        # If signal_logic.type is 'composite', a composite block is required.
+        if self.signal_logic.type == "composite" and self.composite is None:
+            raise ValueError(
+                "signal_logic.type='composite' requires a top-level `composite:` block"
+            )
+        if self.composite is not None and self.signal_logic.type != "composite":
+            raise ValueError(
+                f"`composite:` block present but signal_logic.type is "
+                f"{self.signal_logic.type!r} (must be 'composite')"
+            )
+        return self
 
     @field_validator("status")
     @classmethod

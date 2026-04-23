@@ -12,7 +12,7 @@ BACKTEST_DB = Path.home() / "clawd" / "data" / "backtest-results.duckdb"
 FIRSTRATE_DB = Path.home() / "clawd" / "data" / "firstrate.duckdb"
 FMP_DB = Path.home() / "clawd" / "data" / "fmp.duckdb"
 
-# Live state (future)
+# Live state — intraday splice (fresh 1h / 5m / 15m / 30m bars from EODHD)
 LIVE_TICKS_DB = Path.home() / "clawd" / "data" / "live-ticks.duckdb"
 
 # Enum constants — must match schema.py
@@ -59,6 +59,7 @@ BARS_PER_YEAR = {
 SIGNAL_TYPES = [
     "bollinger-mean-reversion",
     "strat-pattern",
+    "composite",
     "sma-crossover",
     "rsi-mean-reversion",
     "macd-crossover",

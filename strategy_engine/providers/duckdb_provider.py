@@ -25,7 +25,7 @@ from typing import Optional
 import duckdb
 import pandas as pd
 
-from ..config import FIRSTRATE_DB, FMP_DB
+from ..config import FIRSTRATE_DB, FMP_DB, LIVE_TICKS_DB
 
 
 # Registry name → firstrate name
@@ -63,10 +63,15 @@ def load_ohlcv(
     end: Optional[str | date] = None,
     *,
     prefer_fmp_for_recent: bool = True,
+    prefer_live_ticks_for_recent: bool = True,
 ) -> pd.DataFrame:
     """
     Load OHLCV for (symbol, timeframe) from firstrate; resample if needed.
     Returns a DataFrame with DatetimeIndex and columns [open, high, low, close, volume].
+
+    For intraday timeframes, live-ticks.duckdb (EODHD intraday poller output)
+    is spliced in for dates newer than firstrate's ceiling. For daily (and
+    resampled-from-daily) timeframes, fmp.daily_prices provides the splice.
 
     Raises DataNotAvailable if no bars found.
     """
@@ -74,24 +79,27 @@ def load_ohlcv(
         fr_tf = _FIRSTRATE_TIMEFRAME[timeframe]
         base_tf_is_day = (fr_tf == "day")
         df = _load_firstrate(symbol, fr_tf, start, end)
-        # For daily data, splice in fresh fmp daily (fills the 3-5 week firstrate lag).
         if prefer_fmp_for_recent and base_tf_is_day and not df.empty:
             fmp_recent = _load_fmp_daily(symbol, start=df.index.max().date())
             if not fmp_recent.empty:
                 fmp_recent = fmp_recent[fmp_recent.index > df.index.max()]
                 if not fmp_recent.empty:
                     df = pd.concat([df, fmp_recent]).sort_index()
+        elif prefer_live_ticks_for_recent and not base_tf_is_day:
+            # Intraday timeframe — splice live-ticks for dates newer than firstrate
+            df = _splice_live_ticks(df, symbol, fr_tf, start, end)
     elif timeframe in _RESAMPLE_FROM:
         base_tf, rule = _RESAMPLE_FROM[timeframe]
         base = _load_firstrate(symbol, base_tf, start, end)
-        # If we're resampling from daily bars, splice fresh fmp daily into the
-        # base BEFORE resampling — so weekly/monthly bars include latest data.
         if prefer_fmp_for_recent and base_tf == "day" and not base.empty:
             fmp_recent = _load_fmp_daily(symbol, start=base.index.max().date())
             if not fmp_recent.empty:
                 fmp_recent = fmp_recent[fmp_recent.index > base.index.max()]
                 if not fmp_recent.empty:
                     base = pd.concat([base, fmp_recent]).sort_index()
+        elif prefer_live_ticks_for_recent and base_tf != "day":
+            # 4h is resampled from 1hour — splice live-ticks 1hour bars before resample
+            base = _splice_live_ticks(base, symbol, base_tf, start, end)
         df = _resample(base, rule)
     else:
         raise ValueError(f"Unsupported timeframe {timeframe!r}")
@@ -100,6 +108,30 @@ def load_ohlcv(
         raise DataNotAvailable(f"No firstrate data for {symbol} {timeframe} in [{start}, {end}]")
 
     return df
+
+
+def _splice_live_ticks(
+    df: pd.DataFrame,
+    symbol: str,
+    fr_tf: str,
+    start: Optional[str | date],
+    end: Optional[str | date],
+) -> pd.DataFrame:
+    """Append EODHD intraday bars (from live-ticks.duckdb) that are newer than df."""
+    if not Path(LIVE_TICKS_DB).exists():
+        return df
+    try:
+        lt = _load_live_ticks(symbol, fr_tf, start, end)
+    except Exception:
+        return df
+    if lt.empty:
+        return df
+    if df.empty:
+        return lt
+    lt = lt[lt.index > df.index.max()]
+    if lt.empty:
+        return df
+    return pd.concat([df, lt]).sort_index()
 
 
 def _load_firstrate(
@@ -166,6 +198,48 @@ def _load_fmp_daily(
             sql += " AND date <= ?"
             params.append(str(end))
         sql += " ORDER BY date"
+        df = con.execute(sql, params).df()
+    except duckdb.Error:
+        return pd.DataFrame()
+    finally:
+        con.close()
+
+    if df.empty:
+        return df
+    df = df.set_index("datetime")
+    return df
+
+
+def _load_live_ticks(
+    symbol: str,
+    tf_name: str,
+    start: Optional[str | date],
+    end: Optional[str | date],
+) -> pd.DataFrame:
+    """Load EODHD-poller bars from ~/clawd/data/live-ticks.duckdb.
+
+    Graceful-fail: returns empty DataFrame on lock conflict or missing table.
+    Pass `tf_name` in firstrate naming (e.g. '1hour', '5min') — the poller
+    stores under those same labels.
+    """
+    try:
+        con = duckdb.connect(str(LIVE_TICKS_DB), read_only=True)
+    except duckdb.IOException:
+        return pd.DataFrame()
+    try:
+        sql = """
+            SELECT datetime, open, high, low, close, volume
+            FROM ohlcv
+            WHERE symbol = ? AND timeframe = ?
+        """
+        params: list = [symbol, tf_name]
+        if start is not None:
+            sql += " AND datetime >= ?"
+            params.append(str(start))
+        if end is not None:
+            sql += " AND datetime <= ?"
+            params.append(str(end))
+        sql += " ORDER BY datetime"
         df = con.execute(sql, params).df()
     except duckdb.Error:
         return pd.DataFrame()
