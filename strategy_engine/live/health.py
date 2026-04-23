@@ -42,6 +42,9 @@ EXPECTED_AGENTS = [
     "com.matias.strategy-engine.paper-mtm",
     "com.matias.strategy-engine.intraday-poll",
     "com.matias.ideas-auto-archive",
+    "com.matias.ideas-gmail-tostage",
+    "com.matias.ideas-x-bookmarks",
+    "com.matias.ideas-pdf-dropfolder",
     "com.matias.rotate-logs",
 ]
 

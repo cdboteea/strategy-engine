@@ -57,9 +57,30 @@ class SignalFired:
     metadata: str   # JSON
 
 
+def _signal_id_for(strategy_id: str, bar_timestamp) -> str:
+    """Deterministic signal ID from (strategy, bar).
+
+    Two re-runs against the same bar produce the same ID, so
+    persist_signal / open_position_from_signal can idempotently skip
+    duplicates. The previous `datetime.now()+uuid4()` ID was unique per
+    invocation — a restarted detect cron would double-fire.
+
+    Format: `sig-<strategy_id>-<bar_ts_compact>` where bar_ts is
+    normalized to 'YYYYMMDDHHMMSS' (UTC, if a pandas Timestamp; else the
+    string is compacted by stripping non-alphanumerics).
+    """
+    # Compact the bar timestamp to alphanumerics
+    if hasattr(bar_timestamp, "strftime"):
+        # pandas.Timestamp or datetime
+        ts_str = bar_timestamp.strftime("%Y%m%d%H%M%S")
+    else:
+        ts_str = "".join(c for c in str(bar_timestamp) if c.isalnum())[:14] or "nobar"
+    return f"sig-{strategy_id}-{ts_str}"
+
+
 def _new_signal_id(strategy_id: str) -> str:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    return f"sig-{strategy_id}-{ts}-{uuid.uuid4().hex[:6]}"
+    """Back-compat wrapper for old callers (deprecated)."""
+    return _signal_id_for(strategy_id, datetime.now(timezone.utc))
 
 
 def _detect_bollinger(strategy: Strategy) -> Optional[SignalFired]:
@@ -91,7 +112,7 @@ def _detect_bollinger(strategy: Strategy) -> Optional[SignalFired]:
     target = close * (1 + float(getattr(strategy.exit, "target", 0.05)))
 
     return SignalFired(
-        signal_id=_new_signal_id(strategy.id),
+        signal_id=_signal_id_for(strategy.id, classified.index[-1]),
         strategy_id=strategy.id,
         fired_at=datetime.now().astimezone().isoformat(timespec="seconds"),
         bar_timestamp=str(classified.index[-1]),
@@ -166,7 +187,7 @@ def _detect_strat(strategy: Strategy) -> Optional[SignalFired]:
     entry_trigger, target_price, stop_price = levels
 
     return SignalFired(
-        signal_id=_new_signal_id(strategy.id),
+        signal_id=_signal_id_for(strategy.id, classified.index[-1]),
         strategy_id=strategy.id,
         fired_at=datetime.now().astimezone().isoformat(timespec="seconds"),
         bar_timestamp=str(classified.index[-1]),
