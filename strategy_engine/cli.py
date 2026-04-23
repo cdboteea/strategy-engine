@@ -442,10 +442,11 @@ def promote_cmd(
 @cli.command("detect")
 @click.option("--strategy", "strategy_id", default=None, help="Check a single strategy by id")
 @click.option("--all-promoted", is_flag=True, help="Check all strategies with status='promoted'")
-@click.option("--force", is_flag=True, help="Ignore timeframe schedule (check every strategy regardless of bar-close alignment)")
+@click.option("--force", is_flag=True, help="Ignore timeframe schedule")
 @click.option("--no-persist", is_flag=True, help="Don't write to live-signals.duckdb")
-@click.option("--notify/--no-notify", default=True, help="Send telegram/stdout notification on fire")
+@click.option("--notify/--no-notify", default=True, help="Send telegram/stdout notification")
 @click.option("--channel", default="auto", type=click.Choice(["auto", "telegram", "stdout"]))
+@click.option("--paper/--no-paper", default=True, help="Open a paper-trade position when a signal fires")
 def detect_cmd(
     strategy_id: str | None,
     all_promoted: bool,
@@ -453,14 +454,30 @@ def detect_cmd(
     no_persist: bool,
     notify: bool,
     channel: str,
+    paper: bool,
 ) -> None:
-    """Check for fired signals on latest bars. Writes to live-signals.duckdb."""
-    from .live import (
-        detect_signals_for_strategy,
-        detect_all_promoted,
-    )
+    """Check for fired signals on latest bars. Writes to live-signals.duckdb and
+    (by default) opens a paper-trade position per signal."""
+    from .live import detect_signals_for_strategy, detect_all_promoted
     from .live.detector import persist_signal
     from .live.notification import notify_signal, format_signal
+    from .paper import open_position_from_signal
+    from dataclasses import asdict
+
+    def _handle(sig) -> None:
+        click.echo("\n" + format_signal(sig))
+        if not no_persist:
+            persist_signal(sig)
+            click.echo(f"  persisted: signal_id={sig.signal_id}")
+        if notify:
+            used = notify_signal(sig, channel=channel)
+            click.echo(f"  notified via: {used}")
+        if paper and not no_persist:
+            pos_id = open_position_from_signal(asdict(sig))
+            if pos_id:
+                click.echo(f"  paper position opened: {pos_id}")
+            else:
+                click.echo(f"  paper position already exists for this signal")
 
     if strategy_id:
         try:
@@ -471,13 +488,7 @@ def detect_cmd(
         if sig is None:
             click.echo(f"  — no signal on latest bar for {strategy_id}")
             return
-        click.echo("\n" + format_signal(sig) + "\n")
-        if not no_persist:
-            persist_signal(sig)
-            click.echo(f"  persisted: signal_id={sig.signal_id}")
-        if notify:
-            used = notify_signal(sig, channel=channel)
-            click.echo(f"  notified via: {used}")
+        _handle(sig)
         return
 
     if all_promoted:
@@ -485,17 +496,101 @@ def detect_cmd(
         if not fired:
             click.echo("  — no signals fired across promoted strategies")
             return
-        click.echo(f"✓ {len(fired)} signal(s) fired:\n")
+        click.echo(f"✓ {len(fired)} signal(s) fired:")
         for sig in fired:
-            click.echo(format_signal(sig))
-            click.echo()
-            if notify:
-                used = notify_signal(sig, channel=channel)
-                click.echo(f"  notified via: {used}\n")
+            _handle(sig)
         return
 
     click.echo("specify --strategy <id> or --all-promoted", err=True)
     sys.exit(2)
+
+
+# ── paper trading ────────────────────────────────────────────────────────────
+
+
+@cli.group()
+def paper() -> None:
+    """Paper-trading book — auto-positions from detected signals."""
+
+
+@paper.command("mtm")
+def paper_mtm_cmd() -> None:
+    """Mark-to-market all open positions. Closes any that hit target/stop/window."""
+    from .paper import mark_to_market_all
+    summary = mark_to_market_all()
+    click.echo("Mark-to-market complete:")
+    for k, v in summary.items():
+        click.echo(f"  {k}: {v}")
+
+
+@paper.command("positions")
+@click.option("--status", default="open", help="Filter by status (open, closed-target, closed-stop, closed-window, all)")
+@click.option("--json", "as_json", is_flag=True)
+def paper_positions_cmd(status: str, as_json: bool) -> None:
+    """List paper-trading positions."""
+    from .paper import list_positions
+    rows = list_positions(status=status)
+    if as_json:
+        click.echo(json.dumps(rows, default=str, indent=2))
+        return
+    if not rows:
+        click.echo(f"  (no {status} positions)")
+        return
+    click.echo(f"{len(rows)} position(s) with status={status}:\n")
+    for r in rows:
+        pnl_str = ""
+        if r.get("realized_pct_return") is not None:
+            pnl_str = f"realized={r['realized_pct_return']:.2%}"
+        elif r.get("unrealized_pct_return") is not None:
+            pnl_str = f"unrealized={r['unrealized_pct_return']:.2%}"
+        click.echo(f"  {r['position_id']}")
+        click.echo(f"    {r['strategy_id']}  {r['symbol']} {r['timeframe']}  {r['direction']}")
+        click.echo(f"    opened {r['opened_at']} @ ${r['opened_price']:.2f}   {pnl_str}")
+        if r.get("closed_at"):
+            click.echo(f"    closed {r['closed_at']} @ ${r['closed_price']:.2f}  [{r['status']}]")
+        click.echo()
+
+
+@paper.command("report")
+@click.option("--json", "as_json", is_flag=True)
+def paper_report_cmd(as_json: bool) -> None:
+    """High-level book report."""
+    from .paper import overall_summary, realized_pnl_by_strategy
+    overall = overall_summary()
+    per = realized_pnl_by_strategy()
+    if as_json:
+        click.echo(json.dumps({"overall": overall, "per_strategy": per}, default=str, indent=2))
+        return
+    click.echo("Paper-trading book:")
+    click.echo(f"  Latest NAV:           ${overall.get('latest_nav', 100000):,.2f}  (as of {overall.get('latest_nav_date', '—')})")
+    click.echo(f"  Total positions:      {overall.get('total', 0)}")
+    click.echo(f"    open:               {overall.get('n_open', 0)}")
+    click.echo(f"    closed:             {overall.get('n_closed', 0)}")
+    click.echo(f"  Realized P&L:         ${overall.get('realized_usd', 0):+,.2f}")
+    click.echo(f"  Unrealized P&L (open): ${overall.get('unrealized_usd', 0):+,.2f}")
+    click.echo()
+    if per:
+        click.echo("Per strategy:")
+        for row in per:
+            wr = row.get('win_rate', 0) or 0
+            click.echo(
+                f"  {row['strategy_id']:<40} "
+                f"pos={row['n_positions']:>3} "
+                f"(open={row['n_open']} closed={row['n_closed']})  "
+                f"win={wr:.1%}  "
+                f"${row['realized_usd']:+,.2f}"
+            )
+
+
+@paper.command("close")
+@click.argument("position_id")
+@click.option("--price", type=float, required=True)
+@click.option("--reason", default="closed-manual")
+def paper_close_cmd(position_id: str, price: float, reason: str) -> None:
+    """Manually close a position."""
+    from .paper import close_position
+    close_position(position_id, reason=reason, price=price)
+    click.echo(f"✓ closed {position_id} at ${price:.2f} ({reason})")
 
 
 if __name__ == "__main__":
