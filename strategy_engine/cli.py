@@ -130,6 +130,8 @@ def registry_count() -> None:
 @click.option("--cost-profile", default=None,
               type=click.Choice(["zero", "retail-equity", "institutional-equity"]),
               help="Override YAML cost_model with a named profile")
+@click.option("--round-trip-bps", default=None, type=float,
+              help="Override YAML cost_model with a flat round-trip cost in bps (e.g. 20)")
 @click.option("--json", "as_json", is_flag=True)
 def backtest_cmd(
     strategy_id: str,
@@ -138,18 +140,27 @@ def backtest_cmd(
     no_persist: bool,
     no_yaml_update: bool,
     cost_profile: str | None,
+    round_trip_bps: float | None,
     as_json: bool,
 ) -> None:
     """Run a backtest for a single strategy and persist the result.
 
     Precedence for date window: --start/--end flags > YAML backtest_window > full history.
-    Precedence for costs:       --cost-profile flag > YAML cost_model > retail-equity default.
+    Precedence for costs:       --round-trip-bps > --cost-profile > YAML cost_model > retail-equity default.
     """
     from .backtest.runner import run_strategy, append_run_to_yaml, BacktestError
     from .backtest.costs import CostModel
     from .providers.duckdb_provider import DataNotAvailable
 
-    cost_override = CostModel.by_name(cost_profile) if cost_profile else None
+    if round_trip_bps is not None and cost_profile is not None:
+        click.echo("--round-trip-bps and --cost-profile are mutually exclusive", err=True)
+        sys.exit(2)
+    if round_trip_bps is not None:
+        cost_override = CostModel.flat_round_trip(round_trip_bps)
+    elif cost_profile:
+        cost_override = CostModel.by_name(cost_profile)
+    else:
+        cost_override = None
     try:
         run = run_strategy(strategy_id, persist=not no_persist, start=start, end=end,
                             cost_model=cost_override)

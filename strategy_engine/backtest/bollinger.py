@@ -226,6 +226,7 @@ def build_equity_curve(
     trades: list[BollingerTrade],
     bars: pd.DataFrame,
     capital_allocation: float,
+    round_trip_cost_pct: float = 0.0,
 ) -> tuple[pd.Series, pd.Series]:
     """
     Build a bar-level portfolio equity curve.
@@ -233,6 +234,11 @@ def build_equity_curve(
     Returns (equity, is_active) where:
       equity    — cumulative portfolio value (starts at 1.0)
       is_active — boolean series; True on bars with ≥1 open trade
+
+    `round_trip_cost_pct` (e.g. 0.0008 = 8 bps) deducts the full round-trip
+    cost from strategy_return at each trade's exit bar, sized by
+    capital_allocation. Preserves intra-trade bar shape for drawdown
+    metrics while correctly reducing cumulative equity.
     """
     is_active = pd.Series(False, index=bars.index)
     if not trades:
@@ -251,6 +257,9 @@ def build_equity_curve(
             strategy_return.loc[bar_returns.index].values + bar_returns.values * capital_allocation
         )
         is_active.loc[slc.index] = True
+        # Deduct round-trip cost at the exit bar (sized by allocation)
+        if round_trip_cost_pct > 0 and t.exit_date in strategy_return.index:
+            strategy_return.loc[t.exit_date] -= round_trip_cost_pct * capital_allocation
 
     equity = (1.0 + strategy_return).cumprod()
     equity.name = "equity"
@@ -359,7 +368,10 @@ def summarize(
 
     if bars is not None:
         bars_per_year = BARS_PER_YEAR.get(timeframe, 252)
-        equity, is_active = build_equity_curve(trades, bars, capital_allocation)
+        round_trip_pct = cost_model.round_trip_pct if cost_model is not None else 0.0
+        equity, is_active = build_equity_curve(
+            trades, bars, capital_allocation, round_trip_cost_pct=round_trip_pct,
+        )
         metrics = _equity_metrics(equity, bars_per_year, is_active=is_active)
         result.equity_sharpe = metrics["sharpe"]
         result.equity_max_drawdown = metrics["max_dd"]
@@ -379,23 +391,39 @@ def run_bollinger(
     capital_allocation: float = 0.10,
     timeframe: str = "1w",
     cost_model=None,
+    regime_gate=None,
 ) -> BollingerResult:
     """
-    End-to-end: compute bands → detect signals → simulate trades → summarize.
+    End-to-end: compute bands → detect signals → (optional) regime-gate
+    filter → simulate trades → summarize.
 
     `bars` must have a DatetimeIndex and columns [open, high, low, close, volume].
     For weekly-bar strategy, resample daily → weekly BEFORE calling this.
 
     `capital_allocation` and `timeframe` are used for the equity-curve Sharpe
     computation. `cost_model` (optional) nets transaction costs from each
-    trade's pct_return — see strategy_engine.backtest.costs.CostModel.
+    trade's pct_return. `regime_gate` (optional, e.g. VixGate) filters
+    signals whose bar-date fails the gate condition — keeps only bars where
+    the gate evaluates True.
     """
     if not {"open", "high", "low", "close"}.issubset(bars.columns):
         raise ValueError("bars must have open/high/low/close columns")
     df = compute_bollinger(bars, params.lookback, params.std_dev)
     df = detect_signals(df)
+
+    # Regime-gate filter: drop `is_signal` at rows where the gate says no.
+    # We apply BEFORE simulate_trades so filtered-out signals never enter the
+    # trade list. This also makes the n_signals stat reflect post-gate count.
+    if regime_gate is not None:
+        from .regime import apply_vix_gate_to_signals
+        sig_dates = df[df["is_signal"]].index.tolist()
+        kept_dates, gate_stats = apply_vix_gate_to_signals(sig_dates, regime_gate)
+        keep_set = set(kept_dates)
+        df["is_signal"] = df.index.to_series().isin(keep_set) & df["is_signal"]
+
     trades = simulate_trades(df, params)
-    return summarize(
+    result = summarize(
         trades, bars=bars, capital_allocation=capital_allocation,
         timeframe=timeframe, cost_model=cost_model,
     )
+    return result

@@ -1,12 +1,20 @@
 """
 Signal notification channels.
 
-Primary: Telegram via OpenClaw gateway (port 18789).
+Primary: Telegram directly via Bot API (`@matiasassistantbot` → Matias's
+         chat_id 8463750100). The earlier approach of POST /notify to the
+         OpenClaw gateway does NOT work — OpenClaw doesn't expose that
+         endpoint. Direct sendMessage coexists with OpenClaw's inbound
+         getUpdates poll (inbound vs outbound don't conflict).
 Fallback: stdout.
 
 Every attempt (success or failure) is logged to live-signals.notification_log
 with timing, retry count, and error detail. This gives us a paper trail when
 a signal fires but the user never sees it.
+
+Credentials:
+  - Bot token:   Keychain service `telegram-bot-token` (account `telegram-matias-bot`)
+  - Chat ID:     read from ~/.openclaw/openclaw.json allowlist (cached at import)
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -25,12 +33,55 @@ import duckdb
 from .detector import SignalFired
 
 
-OPENCLAW_GATEWAY = "http://127.0.0.1:18789"
+OPENCLAW_GATEWAY = "http://127.0.0.1:18789"     # still used for health checks
 OPENCLAW_TIMEOUT = 3.0
+TELEGRAM_API = "https://api.telegram.org"
 MAX_RETRIES = 3
 BASE_BACKOFF_S = 0.5   # grows to 0.5s, 1.0s, 2.0s
 
 LIVE_DB = Path.home() / "clawd" / "data" / "live-signals.duckdb"
+OPENCLAW_CONFIG = Path.home() / ".openclaw" / "openclaw.json"
+
+
+# ── Credentials ─────────────────────────────────────────────────────────
+
+_cached_bot_token: Optional[str] = None
+_cached_chat_id: Optional[int] = None
+
+
+def _get_bot_token() -> Optional[str]:
+    """Read Telegram bot token from Keychain (cached after first call)."""
+    global _cached_bot_token
+    if _cached_bot_token is not None:
+        return _cached_bot_token
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", "telegram-bot-token", "-w"],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+        if result.returncode == 0:
+            _cached_bot_token = result.stdout.strip()
+            return _cached_bot_token
+    except Exception:
+        pass
+    return None
+
+
+def _get_chat_id() -> Optional[int]:
+    """Read allowlisted chat_id from OpenClaw config (cached)."""
+    global _cached_chat_id
+    if _cached_chat_id is not None:
+        return _cached_chat_id
+    try:
+        with OPENCLAW_CONFIG.open() as f:
+            cfg = json.load(f)
+        allow = cfg.get("channels", {}).get("telegram", {}).get("allowFrom", [])
+        if allow:
+            _cached_chat_id = int(allow[0])
+            return _cached_chat_id
+    except Exception:
+        pass
+    return None
 
 
 # ── Health check ────────────────────────────────────────────────────────────
@@ -90,17 +141,31 @@ def format_signal(sig: SignalFired) -> str:
 # ── Telegram (with retry) ───────────────────────────────────────────────────
 
 def _send_telegram_once(msg: str, timeout: float = OPENCLAW_TIMEOUT) -> None:
-    """Single-attempt Telegram send. Raises on any failure."""
-    payload = {"message": msg, "source": "strategy-engine"}
+    """Single-attempt Telegram send via Bot API. Raises on any failure.
+
+    Uses the `@matiasassistantbot` bot token from Keychain. Outbound
+    sendMessage does NOT conflict with OpenClaw's inbound getUpdates poll.
+    """
+    token = _get_bot_token()
+    chat_id = _get_chat_id()
+    if not token:
+        raise RuntimeError("telegram-bot-token missing from Keychain")
+    if chat_id is None:
+        raise RuntimeError("no chat_id — OpenClaw allowlist empty or config missing")
+
+    payload = {"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
-        f"{OPENCLAW_GATEWAY}/notify",
+        f"{TELEGRAM_API}/bot{token}/sendMessage",
         data=data,
         headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         if resp.status >= 400:
-            raise RuntimeError(f"gateway HTTP {resp.status}")
+            raise RuntimeError(f"Telegram API HTTP {resp.status}")
+        body = json.loads(resp.read().decode())
+        if not body.get("ok"):
+            raise RuntimeError(f"Telegram API not-ok: {body.get('description', body)}")
 
 
 def send_telegram_with_retry(

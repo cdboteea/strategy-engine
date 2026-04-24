@@ -116,6 +116,27 @@ class CostModel:
             f"unknown cost profile {name!r}. Supported: zero, retail-equity, institutional-equity"
         )
 
+    @classmethod
+    def flat_round_trip(cls, round_trip_bps: float) -> "CostModel":
+        """Create a flat cost model from a target round-trip cost in bps.
+
+        The target is split as (spread=bps/2, slippage=bps/4, commission=bps/4)
+        per leg — proportions chosen to preserve the retail-equity ratio
+        (spread dominates, slippage + commission are secondary). Useful for
+        cost-sensitivity sweeps (e.g. `--round-trip-bps 20`).
+        """
+        if round_trip_bps < 0:
+            raise ValueError(f"round_trip_bps must be >= 0, got {round_trip_bps}")
+        if round_trip_bps == 0:
+            return cls.zero()
+        # Per leg = round_trip / 2; spread:slippage:commission = 2:1:1 per leg
+        per_leg = round_trip_bps / 2.0
+        return cls(
+            spread_bps=per_leg * 0.5,
+            slippage_bps=per_leg * 0.25,
+            commission_bps=per_leg * 0.25,
+        )
+
     # ── Cost computation ────────────────────────────────────────────────
 
     @property

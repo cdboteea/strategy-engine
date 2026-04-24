@@ -317,6 +317,7 @@ def build_equity_curve(
     trades: list[StratTrade],
     bars: pd.DataFrame,
     capital_allocation: float,
+    round_trip_cost_pct: float = 0.0,
 ) -> tuple[pd.Series, pd.Series]:
     """
     Bar-level equity curve.
@@ -325,6 +326,9 @@ def build_equity_curve(
       equity    — cumulative portfolio value (starts at 1.0)
       is_active — boolean series, True on bars with ≥1 open trade
                   (used for active-bar Sharpe computation)
+
+    `round_trip_cost_pct` (e.g. 0.0008 = 8 bps) is deducted at each
+    trade's exit bar, sized by capital_allocation.
     """
     is_active = pd.Series(False, index=bars.index)
     if not trades:
@@ -346,6 +350,9 @@ def build_equity_curve(
         )
         # Mark bars during this trade as active (including entry bar)
         is_active.loc[slc.index] = True
+        # Deduct round-trip cost at exit bar (sized by allocation)
+        if round_trip_cost_pct > 0 and t.exit_date in strategy_return.index:
+            strategy_return.loc[t.exit_date] -= round_trip_cost_pct * capital_allocation
 
     equity = (1.0 + strategy_return).cumprod()
     equity.name = "equity"
@@ -436,7 +443,10 @@ def summarize(
     stop_hits = sum(1 for t in trades if t.exit_reason == "stop")
 
     bars_per_year = BARS_PER_YEAR.get(timeframe, 252)
-    equity, is_active = build_equity_curve(trades, bars, capital_allocation)
+    round_trip_pct = cost_model.round_trip_pct if cost_model is not None else 0.0
+    equity, is_active = build_equity_curve(
+        trades, bars, capital_allocation, round_trip_cost_pct=round_trip_pct,
+    )
     metrics = _equity_metrics(equity, bars_per_year, is_active=is_active)
 
     return StratResult(

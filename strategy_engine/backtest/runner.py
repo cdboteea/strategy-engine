@@ -168,12 +168,18 @@ def _run_bollinger(
     if bars.empty:
         raise DataNotAvailable(f"No bars for {symbol} {tf} in [{start}, {end}]")
     params = bol.BollingerParams.from_strategy(strategy)
+    # Build regime gate from YAML if present
+    regime_gate = None
+    if strategy.regime_gate is not None:
+        from .regime import gate_from_config
+        regime_gate = gate_from_config(strategy.regime_gate.model_dump())
     result = bol.run_bollinger(
         bars,
         params,
         capital_allocation=strategy.capital_allocation,
         timeframe=tf,
         cost_model=cost_model,
+        regime_gate=regime_gate,
     )
     return result, bars
 

@@ -72,6 +72,37 @@ class SignalLogic(BaseModel):
         return v
 
 
+class RegimeGateBlock(BaseModel):
+    """Optional regime-gate filter — suspends signal firing when broad-market
+    indicator (e.g. VIX) is outside the acceptable range.
+
+    Typical Bollinger usage: `{type: vix, mode: below, threshold: 35}` — skip
+    mean-reversion entries when VIX > 35 (panic-vol regime where the
+    13-week forward window may not capture the bounce).
+
+    Only evaluated at the primary signal-detection step. Once a trade is
+    open, it runs to completion under normal exit rules.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["vix"] = "vix"
+    mode: Literal["below", "above", "between"] = "below"
+    threshold: Optional[float] = Field(default=None, ge=0)
+    lower: Optional[float] = Field(default=None, ge=0)
+    upper: Optional[float] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _check_mode_fields(self) -> "RegimeGateBlock":
+        if self.mode in ("below", "above") and self.threshold is None:
+            raise ValueError(f"regime_gate mode='{self.mode}' requires `threshold`")
+        if self.mode == "between":
+            if self.lower is None or self.upper is None:
+                raise ValueError("regime_gate mode='between' requires `lower` AND `upper`")
+            if self.lower > self.upper:
+                raise ValueError(f"regime_gate: lower ({self.lower}) > upper ({self.upper})")
+        return self
+
+
 class CostModelBlock(BaseModel):
     """Per-strategy transaction cost model override.
 
@@ -150,6 +181,9 @@ class Strategy(BaseModel):
     promotion: Optional[PromotionMeta] = None
     composite: Optional[CompositeMeta] = None
     cost_model: Optional[CostModelBlock] = None
+    regime_gate: Optional[RegimeGateBlock] = None
+    retired_at: Optional[str] = None
+    retirement_reason: Optional[str] = None
 
     @model_validator(mode="after")
     def _check_composite(self) -> "Strategy":

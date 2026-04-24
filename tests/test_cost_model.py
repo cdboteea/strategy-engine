@@ -182,6 +182,59 @@ def test_bollinger_with_retail_cost_reduces_pct_returns():
     assert r_retail.total_pnl_pct < r_zero.total_pnl_pct
 
 
+def test_cost_flows_through_to_equity_sharpe():
+    """Regression: cost model MUST reduce equity_sharpe as bps increases.
+    Prior to this test, cost only hit per-trade pct_return; equity curve
+    was built from raw bar returns and ignored cost entirely, so
+    equity_sharpe was identical at 0 vs 20 bps. This test locks in the fix
+    (cost deducted from strategy_return at each trade's exit bar)."""
+    bars = _build_bars_with_dip_and_recovery()
+    params = bol.BollingerParams(lookback=20, std_dev=2.0, profit_target=0.05)
+
+    # 0 bps baseline
+    r_zero = bol.run_bollinger(bars, params, capital_allocation=0.1,
+                                 timeframe="1d", cost_model=CostModel.zero())
+    # 8 bps retail
+    r_retail = bol.run_bollinger(bars, params, capital_allocation=0.1,
+                                   timeframe="1d", cost_model=CostModel.retail_equity())
+    # 20 bps heavy
+    r_heavy = bol.run_bollinger(bars, params, capital_allocation=0.1,
+                                  timeframe="1d", cost_model=CostModel.flat_round_trip(20))
+
+    # Must have the same trade count
+    assert r_zero.n_trades == r_retail.n_trades == r_heavy.n_trades
+    assert r_zero.n_trades >= 1
+
+    # Equity-curve metrics MUST differ (strictly decreasing as cost rises)
+    assert r_zero.equity_sharpe > r_retail.equity_sharpe > r_heavy.equity_sharpe, (
+        f"Sharpe must decrease with cost: zero={r_zero.equity_sharpe:.4f}, "
+        f"retail={r_retail.equity_sharpe:.4f}, heavy={r_heavy.equity_sharpe:.4f}"
+    )
+    assert r_zero.equity_total_return > r_retail.equity_total_return > r_heavy.equity_total_return
+
+
+def test_flat_round_trip_preserves_retail_ratios():
+    """flat_round_trip(8) should produce 8bp round-trip with the expected
+    spread:slippage:commission split (2:1:1 per leg)."""
+    cm = CostModel.flat_round_trip(8)
+    assert cm.round_trip_bps == pytest.approx(8.0)
+    # Per leg = 4 bps; split as 2:1:1 → spread=2, slippage=1, commission=1
+    assert cm.spread_bps == pytest.approx(2.0)
+    assert cm.slippage_bps == pytest.approx(1.0)
+    assert cm.commission_bps == pytest.approx(1.0)
+
+
+def test_flat_round_trip_zero_returns_zero_model():
+    cm = CostModel.flat_round_trip(0)
+    assert cm.round_trip_bps == 0.0
+    assert cm.spread_bps == 0.0
+
+
+def test_flat_round_trip_rejects_negative():
+    with pytest.raises(ValueError, match=">= 0"):
+        CostModel.flat_round_trip(-5)
+
+
 def test_heavy_cost_flips_winner_to_loser_on_actual_trade():
     """A small winner (+0.5%) becomes a loser once 2% round-trip cost applies."""
     from strategy_engine.backtest.bollinger import BollingerTrade
