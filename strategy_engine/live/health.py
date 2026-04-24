@@ -270,7 +270,10 @@ def check_promoted_dispatch(max_strategies: int = 20) -> list[Check]:
     except Exception as e:
         return [Check("promoted-dispatch", "error", f"can't list strategies: {e}")]
     promoted = [s for s in ok_list if s.status == "promoted"][:max_strategies]
-    supported = {"bollinger-mean-reversion", "strat-pattern", "composite"}
+    supported = {
+        "bollinger-mean-reversion", "strat-pattern", "composite",
+        "sma-crossover", "macd-crossover", "donchian-breakout", "trend-pullback",
+    }
     out: list[Check] = []
     n_ok = 0
     for s in promoted:

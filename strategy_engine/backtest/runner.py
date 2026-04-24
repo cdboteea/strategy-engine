@@ -155,34 +155,40 @@ def _run_strat(
     return result, trade_bars
 
 
-def _run_momentum_family(
+def _run_one_ticker_momentum(
     strategy: Strategy,
     signal_type: str,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
+    symbol: str,
+    start: Optional[str],
+    end: Optional[str],
     *,
     cost_model: Optional[CostModel] = None,
 ):
-    """Dispatch SMA/MACD crossover, Donchian breakout, trend-pullback."""
-    symbol = strategy.instruments[0]
+    """Run a momentum-family signal on a single ticker. Returns (result, bars)."""
     tf = strategy.timeframe
     bars = load_ohlcv(symbol=symbol, timeframe=tf, start=start, end=end)
     if bars.empty:
         raise DataNotAvailable(f"No bars for {symbol} {tf}")
+
+    # Build regime gate from YAML if present (SMA + MACD support it)
+    regime_gate = None
+    if strategy.regime_gate is not None:
+        from .regime import gate_from_config
+        regime_gate = gate_from_config(strategy.regime_gate.model_dump())
 
     if signal_type == "sma-crossover":
         from .momentum import SmaCrossoverParams, run_sma_crossover
         params = SmaCrossoverParams.from_strategy(strategy)
         result = run_sma_crossover(
             bars, params, capital_allocation=strategy.capital_allocation,
-            timeframe=tf, cost_model=cost_model,
+            timeframe=tf, cost_model=cost_model, regime_gate=regime_gate,
         )
     elif signal_type == "macd-crossover":
         from .momentum import MacdCrossoverParams, run_macd_crossover
         params = MacdCrossoverParams.from_strategy(strategy)
         result = run_macd_crossover(
             bars, params, capital_allocation=strategy.capital_allocation,
-            timeframe=tf, cost_model=cost_model,
+            timeframe=tf, cost_model=cost_model, regime_gate=regime_gate,
         )
     elif signal_type == "donchian-breakout":
         from .breakout import DonchianParams, run_donchian
@@ -199,8 +205,153 @@ def _run_momentum_family(
             timeframe=tf, cost_model=cost_model,
         )
     else:
-        raise BacktestError(f"_run_momentum_family: unexpected type {signal_type!r}")
+        raise BacktestError(f"_run_one_ticker_momentum: unexpected type {signal_type!r}")
+
+    # Tag each trade with its symbol for multi-ticker aggregation
+    for t in result.trades:
+        if t.symbol is None:
+            t.symbol = symbol
     return result, bars
+
+
+def _run_momentum_family(
+    strategy: Strategy,
+    signal_type: str,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    *,
+    cost_model: Optional[CostModel] = None,
+):
+    """Dispatch SMA/MACD/Donchian/trend-pullback. Single-ticker OR multi-ticker basket.
+
+    Multi-ticker basket: each ticker is treated as an independent strategy
+    sharing the same signal_logic. Results aggregate (sum trades, re-compute
+    summary). Bars returned are the primary ticker's for date-range reference.
+    """
+    if len(strategy.instruments) == 1:
+        return _run_one_ticker_momentum(
+            strategy, signal_type, strategy.instruments[0], start, end,
+            cost_model=cost_model,
+        )
+
+    # ── Multi-ticker basket ──────────────────────────────────────────
+    from .momentum import MomentumResult, summarize as m_summarize
+
+    all_trades = []
+    bars_by_symbol = {}
+    per_ticker_results = {}
+    for sym in strategy.instruments:
+        try:
+            res, bars = _run_one_ticker_momentum(
+                strategy, signal_type, sym, start, end, cost_model=cost_model,
+            )
+            all_trades.extend(res.trades)
+            bars_by_symbol[sym] = bars
+            per_ticker_results[sym] = res
+        except DataNotAvailable:
+            # Skip symbols with no data in the window; log in result.metadata later
+            continue
+
+    if not bars_by_symbol:
+        raise DataNotAvailable(
+            f"No bars for any of {strategy.instruments} ({strategy.timeframe})"
+        )
+
+    # Use the primary ticker's bars for the date range in the aggregate result
+    primary = strategy.instruments[0]
+    if primary in bars_by_symbol:
+        primary_bars = bars_by_symbol[primary]
+    else:
+        primary_bars = next(iter(bars_by_symbol.values()))
+
+    # Re-summarize the aggregated trade list. Cost has already been applied
+    # per-ticker; pass cost_model=None to avoid double-charging, but build the
+    # equity curve using the primary bar index.
+    aggregate = _build_basket_equity(
+        all_trades, bars_by_symbol, strategy.capital_allocation,
+        strategy.timeframe,
+    )
+    return aggregate, primary_bars
+
+
+def _build_basket_equity(
+    trades: list,
+    bars_by_symbol: dict,
+    capital_allocation: float,
+    timeframe: str,
+):
+    """Build a MomentumResult aggregating across a multi-ticker basket.
+
+    Equity curve is constructed by summing per-ticker daily returns on a
+    shared date index. Each ticker contributes up to capital_allocation
+    when its trade is active; max deployment is N_tickers × capital_allocation.
+    """
+    from .momentum import MomentumResult, _equity_metrics
+    import numpy as np
+
+    if not trades:
+        return MomentumResult()
+
+    # Shared union of all dates across tickers' bars
+    import pandas as pd
+    all_idx = None
+    for sym, bars in bars_by_symbol.items():
+        all_idx = bars.index if all_idx is None else all_idx.union(bars.index)
+    all_idx = all_idx.sort_values() if all_idx is not None else pd.DatetimeIndex([])
+
+    strategy_return = pd.Series(0.0, index=all_idx)
+    is_active = pd.Series(False, index=all_idx)
+
+    # For each trade, add its bar-level returns (× capital_allocation) to the shared series
+    for t in trades:
+        sym = t.symbol
+        if sym not in bars_by_symbol:
+            continue
+        bars = bars_by_symbol[sym]
+        try:
+            slc = bars.loc[t.entry_date: t.exit_date]
+        except KeyError:
+            continue
+        if len(slc) < 2:
+            continue
+        bar_returns = slc["close"].pct_change().dropna()
+        if t.direction == "bearish":
+            bar_returns = -bar_returns
+        strategy_return.loc[bar_returns.index] = (
+            strategy_return.loc[bar_returns.index].values
+            + bar_returns.values * capital_allocation
+        )
+        is_active.loc[slc.index] = True
+
+    equity = (1.0 + strategy_return).cumprod()
+    equity.name = "equity"
+
+    from ..config import BARS_PER_YEAR
+    bars_per_year = BARS_PER_YEAR.get(timeframe, 252)
+    metrics = _equity_metrics(equity, bars_per_year, is_active=is_active)
+
+    returns_arr = np.array([t.pct_return for t in trades])
+    wins = returns_arr[returns_arr > 0]
+    losses = returns_arr[returns_arr <= 0]
+    pf = float(wins.sum() / abs(losses.sum())) if losses.sum() != 0 else float("inf")
+
+    return MomentumResult(
+        trades=trades,
+        n_signals=len(trades),
+        n_trades=len(trades),
+        win_rate=float((returns_arr > 0).mean()),
+        avg_return=float(returns_arr.mean()),
+        median_return=float(np.median(returns_arr)),
+        profit_factor=pf,
+        total_pnl_pct=float(returns_arr.sum()),
+        equity_sharpe=metrics["sharpe"],
+        equity_max_drawdown=metrics["max_dd"],
+        equity_total_return=metrics["total_return"],
+        equity_ann_return=metrics["ann_return"],
+        active_bar_sharpe=metrics["active_bar_sharpe"],
+        active_bars=metrics["active_bars"],
+        active_bar_fraction=metrics["active_bar_fraction"],
+    )
 
 
 def _run_bollinger(

@@ -50,7 +50,7 @@ class SmaCrossoverParams:
 
 @dataclass
 class MomentumTrade:
-    """Both SMA and MACD crossovers produce this shape."""
+    """Shared trade shape for SMA, MACD, Donchian, trend-pullback."""
     entry_date: pd.Timestamp
     entry_price: float
     exit_date: pd.Timestamp
@@ -58,7 +58,8 @@ class MomentumTrade:
     direction: str           # "bullish" | "bearish"
     holding_bars: int
     pct_return: float
-    exit_reason: str         # "reverse-cross" | "end-of-data"
+    exit_reason: str         # "reverse-cross" | "end-of-data" | "trailing-stop" | "pullback-resolved" | "trend-broken"
+    symbol: Optional[str] = None   # populated for multi-ticker baskets
 
 
 @dataclass
@@ -371,6 +372,23 @@ def summarize(
     return result
 
 
+def _apply_regime_gate_to_crosses(df: pd.DataFrame, regime_gate) -> pd.DataFrame:
+    """Zero out bullish_cross / bearish_cross on bars where the regime gate
+    says NO. Preserves the `in_position exit` path — if we're already in a
+    trade during a gated regime, the exit cross still fires.
+    """
+    if regime_gate is None:
+        return df
+    from .regime import apply_vix_gate_to_signals
+    # Get bars where a bullish cross would fire
+    bull_dates = df[df.get("bullish_cross", False)].index.tolist()
+    kept, _ = apply_vix_gate_to_signals(bull_dates, regime_gate)
+    keep_set = set(kept)
+    df = df.copy()
+    df["bullish_cross"] = df.index.to_series().isin(keep_set) & df["bullish_cross"]
+    return df
+
+
 def run_sma_crossover(
     bars: pd.DataFrame,
     params: SmaCrossoverParams,
@@ -378,8 +396,10 @@ def run_sma_crossover(
     capital_allocation: float = 0.10,
     timeframe: str = "1d",
     cost_model=None,
+    regime_gate=None,
 ) -> MomentumResult:
     df = compute_sma_crossover(bars, params.fast_window, params.slow_window)
+    df = _apply_regime_gate_to_crosses(df, regime_gate)
     trades = simulate_sma_crossover(df, params)
     return summarize(trades, bars=bars, capital_allocation=capital_allocation,
                      timeframe=timeframe, cost_model=cost_model)
@@ -392,8 +412,10 @@ def run_macd_crossover(
     capital_allocation: float = 0.10,
     timeframe: str = "1d",
     cost_model=None,
+    regime_gate=None,
 ) -> MomentumResult:
     df = compute_macd_crossover(bars, params)
+    df = _apply_regime_gate_to_crosses(df, regime_gate)
     trades = simulate_macd_crossover(df, params)
     return summarize(trades, bars=bars, capital_allocation=capital_allocation,
                      timeframe=timeframe, cost_model=cost_model)

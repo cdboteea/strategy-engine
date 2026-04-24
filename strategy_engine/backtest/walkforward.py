@@ -185,11 +185,32 @@ def _run_fold_momentum(
     *,
     cost_model=None,
 ):
-    """Run one fold of a momentum-family strategy on a sliced bar range."""
+    """Run one fold of a momentum-family strategy.
+
+    For single-ticker strategies: slice the passed bars and run directly.
+    For multi-ticker baskets: delegate to runner._run_momentum_family with
+    the fold's date window — it loads + iterates each ticker.
+    """
+    from .momentum import MomentumResult
+
+    # Multi-ticker: go through the full dispatcher so each ticker's bars
+    # get the window applied independently
+    if len(strategy.instruments) > 1:
+        from .runner import _run_momentum_family
+        try:
+            result, _ = _run_momentum_family(
+                strategy, signal_type,
+                start=start.date().isoformat(),
+                end=end.date().isoformat(),
+                cost_model=cost_model,
+            )
+            return result
+        except Exception:
+            return MomentumResult()
+
+    # Single-ticker path (fast — bars already pre-loaded)
     slc = _slice_bars(bars, start, end)
     if len(slc) < 30:
-        # Return an empty MomentumResult — same shape as the non-empty one
-        from .momentum import MomentumResult
         return MomentumResult()
 
     cap = strategy.capital_allocation
