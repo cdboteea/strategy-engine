@@ -212,6 +212,11 @@ def backtest_cmd(
 @click.option("--step-years", default=1, type=int)
 @click.option("--start", default=None)
 @click.option("--end", default=None)
+@click.option("--cost-profile", default=None,
+              type=click.Choice(["zero", "retail-equity", "institutional-equity"]),
+              help="Override YAML cost_model with a named profile")
+@click.option("--round-trip-bps", default=None, type=float,
+              help="Override YAML cost_model with a flat round-trip cost in bps")
 @click.option("--json", "as_json", is_flag=True)
 def walkforward_cmd(
     strategy_id: str,
@@ -220,13 +225,31 @@ def walkforward_cmd(
     step_years: int,
     start: str | None,
     end: str | None,
+    cost_profile: str | None,
+    round_trip_bps: float | None,
     as_json: bool,
 ) -> None:
-    """Run walk-forward cross-validation on a strategy."""
+    """Run walk-forward cross-validation on a strategy.
+
+    Cost precedence: --round-trip-bps > --cost-profile > YAML cost_model >
+    retail-equity default (8 bps round trip). Pass `--cost-profile zero`
+    for a costless baseline.
+    """
     from .backtest.walkforward import run_walkforward
+    from .backtest.costs import CostModel
     from .providers.duckdb_provider import load_ohlcv, DataNotAvailable
     from .registry.loader import load_one
     from .backtest.runner import _find_yaml_path, _resolve_window
+
+    if round_trip_bps is not None and cost_profile is not None:
+        click.echo("--round-trip-bps and --cost-profile are mutually exclusive", err=True)
+        sys.exit(2)
+    if round_trip_bps is not None:
+        cost_override = CostModel.flat_round_trip(round_trip_bps)
+    elif cost_profile:
+        cost_override = CostModel.by_name(cost_profile)
+    else:
+        cost_override = None
 
     yaml_path = _find_yaml_path(strategy_id)
     if not yaml_path:
@@ -262,6 +285,7 @@ def walkforward_cmd(
         strategy, bars,
         train_years=train_years, test_years=test_years, step_years=step_years,
         higher_timeframes=higher_tfs,
+        cost_model=cost_override,
     )
 
     if as_json:

@@ -155,6 +155,54 @@ def _run_strat(
     return result, trade_bars
 
 
+def _run_momentum_family(
+    strategy: Strategy,
+    signal_type: str,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    *,
+    cost_model: Optional[CostModel] = None,
+):
+    """Dispatch SMA/MACD crossover, Donchian breakout, trend-pullback."""
+    symbol = strategy.instruments[0]
+    tf = strategy.timeframe
+    bars = load_ohlcv(symbol=symbol, timeframe=tf, start=start, end=end)
+    if bars.empty:
+        raise DataNotAvailable(f"No bars for {symbol} {tf}")
+
+    if signal_type == "sma-crossover":
+        from .momentum import SmaCrossoverParams, run_sma_crossover
+        params = SmaCrossoverParams.from_strategy(strategy)
+        result = run_sma_crossover(
+            bars, params, capital_allocation=strategy.capital_allocation,
+            timeframe=tf, cost_model=cost_model,
+        )
+    elif signal_type == "macd-crossover":
+        from .momentum import MacdCrossoverParams, run_macd_crossover
+        params = MacdCrossoverParams.from_strategy(strategy)
+        result = run_macd_crossover(
+            bars, params, capital_allocation=strategy.capital_allocation,
+            timeframe=tf, cost_model=cost_model,
+        )
+    elif signal_type == "donchian-breakout":
+        from .breakout import DonchianParams, run_donchian
+        params = DonchianParams.from_strategy(strategy)
+        result = run_donchian(
+            bars, params, capital_allocation=strategy.capital_allocation,
+            timeframe=tf, cost_model=cost_model,
+        )
+    elif signal_type == "trend-pullback":
+        from .trend import TrendPullbackParams, run_trend_pullback
+        params = TrendPullbackParams.from_strategy(strategy)
+        result = run_trend_pullback(
+            bars, params, capital_allocation=strategy.capital_allocation,
+            timeframe=tf, cost_model=cost_model,
+        )
+    else:
+        raise BacktestError(f"_run_momentum_family: unexpected type {signal_type!r}")
+    return result, bars
+
+
 def _run_bollinger(
     strategy: Strategy,
     start: Optional[str] = None,
@@ -220,6 +268,11 @@ def run_strategy(
     elif signal_type == "strat-pattern":
         result, bars = _run_strat(strategy, start=eff_start, end=eff_end,
                                    cost_model=effective_cost)
+    elif signal_type in ("sma-crossover", "macd-crossover", "donchian-breakout", "trend-pullback"):
+        result, bars = _run_momentum_family(
+            strategy, signal_type, start=eff_start, end=eff_end,
+            cost_model=effective_cost,
+        )
     elif signal_type == "composite":
         comp_run = comp.run_composite(strategy, start=eff_start, end=eff_end,
                                         cost_model=effective_cost)
@@ -241,7 +294,8 @@ def run_strategy(
     else:
         raise BacktestError(
             f"Unsupported signal_type {signal_type!r} for {strategy_id}. "
-            f"Supported: bollinger-mean-reversion, strat-pattern, composite."
+            f"Supported: bollinger-mean-reversion, strat-pattern, composite, "
+            f"sma-crossover, macd-crossover, donchian-breakout, trend-pullback."
         )
 
     # Build BacktestRun record
@@ -290,7 +344,7 @@ def run_strategy(
             "total_pnl_pct": result.total_pnl_pct,
             "second_half_hit_rate": result.second_half_hit_rate,
         }
-    else:  # strat-pattern
+    elif signal_type == "strat-pattern":
         trades_payload = [
             {
                 "pattern": t.pattern,
@@ -329,6 +383,38 @@ def run_strategy(
             "total_pnl_pct": result.total_pnl_pct,
             "target_hit_rate": result.target_hit_rate,
             "stop_hit_rate": result.stop_hit_rate,
+        }
+    else:  # sma-crossover, macd-crossover, donchian-breakout, trend-pullback
+        trades_payload = [
+            {
+                "direction": t.direction,
+                "entry_date": t.entry_date.isoformat(),
+                "entry_price": t.entry_price,
+                "exit_date": t.exit_date.isoformat(),
+                "exit_price": t.exit_price,
+                "exit_reason": t.exit_reason,
+                "holding_bars": t.holding_bars,
+                "pct_return": t.pct_return,
+            }
+            for t in result.trades
+        ]
+        summary_payload = {
+            "n_signals": result.n_signals,
+            "n_trades": result.n_trades,
+            "win_rate": result.win_rate,
+            "avg_return": result.avg_return,
+            "median_return": result.median_return,
+            "equity_sharpe": result.equity_sharpe,
+            "equity_max_drawdown": result.equity_max_drawdown,
+            "equity_total_return": result.equity_total_return,
+            "equity_ann_return": result.equity_ann_return,
+            "active_bar_sharpe": result.active_bar_sharpe,
+            "active_bars": result.active_bars,
+            "active_bar_fraction": result.active_bar_fraction,
+            "profit_factor": (
+                result.profit_factor if result.profit_factor != float("inf") else "inf"
+            ),
+            "total_pnl_pct": result.total_pnl_pct,
         }
     result_bundle = {"summary": summary_payload, "trades": trades_payload}
     if composite_meta_payload is not None:

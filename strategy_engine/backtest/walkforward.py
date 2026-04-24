@@ -93,11 +93,20 @@ def _run_fold_bollinger(
     params: BollingerParams,
     capital_allocation: float,
     timeframe: str,
+    *,
+    cost_model=None,
+    regime_gate=None,
 ) -> BollingerResult:
     slc = _slice_bars(bars, start, end)
     if len(slc) < params.lookback + 5:
         return BollingerResult()
-    return run_bollinger(slc, params, capital_allocation=capital_allocation, timeframe=timeframe)
+    return run_bollinger(
+        slc, params,
+        capital_allocation=capital_allocation,
+        timeframe=timeframe,
+        cost_model=cost_model,
+        regime_gate=regime_gate,
+    )
 
 
 def _run_fold_strat(
@@ -110,6 +119,8 @@ def _run_fold_strat(
     params: StratParams,
     capital_allocation: float,
     timeframe: str,
+    *,
+    cost_model=None,
 ):
     """Run STRAT on a slice of pre-classified bars + pre-computed FTFC."""
     slc_bars = _slice_bars(bars, start, end)
@@ -128,13 +139,18 @@ def _run_fold_strat(
         )
 
     trades, n_raw, n_ftfc = strat_simulate(slc_classified, slc_ftfc, params)
-    return strat_summarize(trades, n_raw, n_ftfc, slc_bars, capital_allocation, timeframe)
+    return strat_summarize(
+        trades, n_raw, n_ftfc, slc_bars, capital_allocation, timeframe,
+        cost_model=cost_model,
+    )
 
 
 def _run_fold_composite(
     strategy: Strategy,
     start: pd.Timestamp,
     end: pd.Timestamp,
+    *,
+    cost_model=None,
 ) -> BollingerResult:
     """
     Run a composite (primary + confirmations) on a single fold.
@@ -152,11 +168,57 @@ def _run_fold_composite(
             strategy,
             start=start.date().isoformat(),
             end=end.date().isoformat(),
+            cost_model=cost_model,
         )
         return comp_run.result
     except Exception:
         # Fold is too short or missing data — treat as empty
         return BollingerResult()
+
+
+def _run_fold_momentum(
+    strategy: Strategy,
+    signal_type: str,
+    bars: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    cost_model=None,
+):
+    """Run one fold of a momentum-family strategy on a sliced bar range."""
+    slc = _slice_bars(bars, start, end)
+    if len(slc) < 30:
+        # Return an empty MomentumResult — same shape as the non-empty one
+        from .momentum import MomentumResult
+        return MomentumResult()
+
+    cap = strategy.capital_allocation
+    tf = strategy.timeframe
+    if signal_type == "sma-crossover":
+        from .momentum import SmaCrossoverParams, run_sma_crossover
+        return run_sma_crossover(
+            slc, SmaCrossoverParams.from_strategy(strategy),
+            capital_allocation=cap, timeframe=tf, cost_model=cost_model,
+        )
+    if signal_type == "macd-crossover":
+        from .momentum import MacdCrossoverParams, run_macd_crossover
+        return run_macd_crossover(
+            slc, MacdCrossoverParams.from_strategy(strategy),
+            capital_allocation=cap, timeframe=tf, cost_model=cost_model,
+        )
+    if signal_type == "donchian-breakout":
+        from .breakout import DonchianParams, run_donchian
+        return run_donchian(
+            slc, DonchianParams.from_strategy(strategy),
+            capital_allocation=cap, timeframe=tf, cost_model=cost_model,
+        )
+    if signal_type == "trend-pullback":
+        from .trend import TrendPullbackParams, run_trend_pullback
+        return run_trend_pullback(
+            slc, TrendPullbackParams.from_strategy(strategy),
+            capital_allocation=cap, timeframe=tf, cost_model=cost_model,
+        )
+    raise NotImplementedError(f"_run_fold_momentum doesn't support {signal_type!r}")
 
 
 def _result_metrics(res) -> dict:
@@ -185,6 +247,7 @@ def run_walkforward(
     test_years: int = 1,
     step_years: int = 1,
     higher_timeframes: Optional[dict[str, pd.DataFrame]] = None,
+    cost_model=None,
 ) -> WalkForwardResult:
     """
     Generate rolling [train_years] → [test_years] folds, advancing by step_years.
@@ -194,12 +257,28 @@ def run_walkforward(
       Fold 2: train 2007-2009, test 2010
       ...
       Fold N: train 2022-2024, test 2025
+
+    If `cost_model` is None, falls back to the strategy's YAML cost_model
+    (default retail-equity = 8 bps). Pass `CostModel.zero()` for a
+    costless walk-forward baseline.
     """
+    from .costs import CostModel
+    from .regime import gate_from_config
+
     signal_type = strategy.signal_logic.type
-    if signal_type not in ("bollinger-mean-reversion", "strat-pattern", "composite"):
+    MOMENTUM_FAMILY = ("sma-crossover", "macd-crossover", "donchian-breakout", "trend-pullback")
+    if signal_type not in ("bollinger-mean-reversion", "strat-pattern", "composite", *MOMENTUM_FAMILY):
         raise NotImplementedError(
             f"Walk-forward doesn't support signal type {signal_type!r}"
         )
+
+    # Resolve cost model: explicit > YAML > retail-equity default
+    effective_cost = cost_model if cost_model is not None else CostModel.from_strategy(strategy)
+
+    # Build regime gate if strategy YAML has one
+    regime_gate = None
+    if strategy.regime_gate is not None:
+        regime_gate = gate_from_config(strategy.regime_gate.model_dump())
 
     cap = strategy.capital_allocation
     tf = strategy.timeframe
@@ -230,7 +309,7 @@ def run_walkforward(
         )
     elif signal_type == "bollinger-mean-reversion":
         bol_params = BollingerParams.from_strategy(strategy)
-    # composite: no pre-compute — delegates to run_composite per fold
+    # composite + momentum family: no pre-compute — delegate per fold
 
     # Generate fold date boundaries
     history_start = bars.index.min()
@@ -249,20 +328,41 @@ def run_walkforward(
             break
 
         if signal_type == "bollinger-mean-reversion":
-            train_res = _run_fold_bollinger(bars, train_start, train_end, bol_params, cap, tf)
-            test_res = _run_fold_bollinger(bars, test_start, test_end, bol_params, cap, tf)
+            train_res = _run_fold_bollinger(
+                bars, train_start, train_end, bol_params, cap, tf,
+                cost_model=effective_cost, regime_gate=regime_gate,
+            )
+            test_res = _run_fold_bollinger(
+                bars, test_start, test_end, bol_params, cap, tf,
+                cost_model=effective_cost, regime_gate=regime_gate,
+            )
         elif signal_type == "strat-pattern":
             train_res = _run_fold_strat(
                 bars, classified_full, ftfc_full, train_start, train_end,
                 wanted_pattern, strat_params, cap, tf,
+                cost_model=effective_cost,
             )
             test_res = _run_fold_strat(
                 bars, classified_full, ftfc_full, test_start, test_end,
                 wanted_pattern, strat_params, cap, tf,
+                cost_model=effective_cost,
             )
-        else:  # composite
-            train_res = _run_fold_composite(strategy, train_start, train_end)
-            test_res = _run_fold_composite(strategy, test_start, test_end)
+        elif signal_type == "composite":
+            train_res = _run_fold_composite(
+                strategy, train_start, train_end, cost_model=effective_cost,
+            )
+            test_res = _run_fold_composite(
+                strategy, test_start, test_end, cost_model=effective_cost,
+            )
+        else:  # momentum family (sma, macd, donchian, trend-pullback)
+            train_res = _run_fold_momentum(
+                strategy, signal_type, bars, train_start, train_end,
+                cost_model=effective_cost,
+            )
+            test_res = _run_fold_momentum(
+                strategy, signal_type, bars, test_start, test_end,
+                cost_model=effective_cost,
+            )
 
         tr = _result_metrics(train_res)
         te = _result_metrics(test_res)
